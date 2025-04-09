@@ -1,139 +1,100 @@
-from dotenv import load_dotenv
-import os
-import streamlit as st 
-from openai import OpenAI as openai
+from openai import OpenAI
 
-load_dotenv()
-openai.api_key = os.getenv("API")
+import streamlit as st
+
+client = OpenAI(api_key="API KEY HERE") 
 
 # create a text wrapper function
 def get_completion(prompt, model="gpt-3.5-turbo"):
-  completion = openai.chat.completions.create(
+  completion = client.chat.completions.create(
       model=model,
       messages=[
-      {"role": "system", "content":"You are a college advisor assistant helping college students navigate career choices. Use the prompt to identify skills or passions to make a list of 5 career choices that are applicable with the prompt. Include a list of soft skills and technical skills as key indicators for determining the role best for them for each career choice. In addition,you must also give a brief description of each of the career choices as showing what each career choice provides. Present the following information for each career shown in different sections: Name of role, soft skills, technical skills, and description of role."},
+      {"role": "system", "content":"You are a recycling expert who knows where to dispose of different types of waste materials. Provide a list of appropriate disposal methods and areas that the prompt contains."},
       {"role": "user", "content": prompt},
       ]
   )
   return completion.choices[0].message.content
 
-# create our streamlit text app
-st.title("Career AI Tool")
-with st.form(key = "chat"):
-    prompt = st.text_area(
-      "Provide a brief summary of your own skills or passions you want to follow after college. "
-      "I will be able to generate career choices for you."
-      ) # TODO!
-    
-    submitted = st.form_submit_button("Submit")
-    
-    if submitted:
-        st.write(get_completion(prompt))
+st.title("Recycling Expert Chatbot")
+with st.form(key='chat'):
+  user_input = st.text_input("Ask me a question about what garbage is blocking your path currently and I will list some appropriate to dispose of it.")
+  submit_button = st.form_submit_button(label='Submit')
 
-#
-# IMAGE GENERATION
-#
+  if submit_button:
+    response = get_completion(user_input)
+    st.write(response)
 
-import requests
-from openai import OpenAI
-import streamlit as st
-import os
+## FUNCTION 2
 
-def get_images(prompt2,model="dall-e-3"):
-  try:
-    response = openai.images.generate(
-      model=model,
-      prompt=prompt2,
-      size="1792x1024",
-      quality="hd",
-      n=1,
+def transcribe_audio(audio_file_path):
+    audio_file = open(audio_file_path, "rb")
+    transcription = client.audio.transcriptions.create(
+        model="whisper-1", 
+        file=audio_file
     )
-    return response
-  except Exception as e:
-     st.error(f"Error generating image: {e}")
-     return None
+    return transcription.text
 
-def download_image(filename, url):
-   response = requests.get(url)
-   if response.status_code == 200:
-      os.makedirs("images",exist_ok=True)
+def key_points_extraction(transcription):
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a proficient AI with a specialty in distilling information into key points. Based on the following text, identify and list the main points that were discussed or brought up. These should be the most important ideas, findings, or topics that are crucial to the essence of the discussion. Your goal is to provide a list that someone could read to quickly understand what was talked about."
+            },
+            {
+                "role": "user",
+                "content": transcription
+            }
+        ]
+    )
+    return response.choices[0].message.content
 
-      with open(filename, 'wb') as file:
-         file.write(response.content)
-      return filename
-   else:
-      print("Error downloading image from URL:", url) 
-      return None
+def action_item_extraction(transcription):
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an AI expert in analyzing text extracting action items. Please review the text and identify and extract actionable steps from audio reports to address urban blight and safety hazards by identifying issues, assigning tasks, and prioritizing resolutions. Please list these action items clearly and concisely."
+            },
+            {
+                "role": "user",
+                "content": transcription
+            }
+        ]
+    )
+    return response.choices[0].message.content
 
-# Generates a file name from the user's input.
-def filename_from_input(prompt2):
-  # Removes all non-alphanumeric characters from the prompt except spaces
-  alphanum = ""
-  for character in prompt2:
-    if character.isalnum() or character == " ":
-      alphanum += character
-  # Split the alphanumeric prompt into words
-  # Take the first three words if there are more than three; else take all of them.
-  alphanumSplit = alphanum.split()
-  if len(alphanumSplit) > 3:
-    alphanumSplit = alphanumSplit[:3]
-  #Join the words with underscores and return the result. !!!ADDING PNG EXTENSION!!!
-  return "images/" + "_".join(alphanumSplit) + ".png"
-
-if "image_url" not in st.session_state:
-    st.session_state.image_url = None
-if "filename" not in st.session_state:
-    st.session_state.filename = None
-
-# create streamlit image app
-st.title("Career Image Generator")
-
-with st.form(key="career_form"):
-  prompt2 = st.text_input("Give me a job or career that you want to pursue in and I'll generate an image of the career for you")
-  submitted2 = st.form_submit_button("Generate Image")
-  
-  if submitted2:
-    if prompt2.strip():  # Ensure input is not empty
-        response = get_images(prompt2)
-        if response and hasattr(response, "data"):
-            image_url = response.data[0].url
-            st.session_state.image_url =image_url
-            st.image(image_url, caption=f"Generated image for: {prompt2}")
-            
-            #Creating file name:
-            filename = filename_from_input(prompt2)
-            st.session_state.filename = filename
-
-            #DOWNLOAD IMAGE to own computer:
-            SaveFile = download_image(filename, image_url)
-
-            if SaveFile and os.path.exists(SaveFile):
-               st.session_state.filename = SaveFile
-        else:
-            st.error("Failed to generate image. Please try again.")
-    else:
-        st.error("Please enter a valid career name.")
-
-if st.session_state.filename and os.path.exists(st.session_state.filename):
-    with open(st.session_state.filename, "rb") as file:
-        st.download_button(
-            label="Download Image",
-            data=file,
-            file_name=os.path.basename(st.session_state.filename),
-            mime="image/png"
-        )
-
-# Rate my Website:
-st.divider()
-
-rate = st.radio(
-   "Rate my site!",
-   ["***Great!*** :thumbsup:", "***Not Great*** :thumbsdown:"],
-   index=None,
-   )
-st.write("You Selected:", rate)
-
-followup = st.text_input("Write down what I can do to improve the website! :smiley:")
-
-if followup:
-  st.write("Your Response:",followup)
+# FUNCTION 3: NOTIFICATIONS
+def send_notification(obstacle_description):
+    """
+    Notifies users about detected objects, hazards, or obstacles 
+    and provides suggestions for the best course of action.
+    
+    Parameters:
+    - obstacle_description (str): Description of the detected obstacle or hazard.
+    
+    Returns:
+    - str: A notification message with a suggested action.
+    """
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an AI assistant that helps users navigate obstacles safely. Based on the described hazard or obstacle, provide a clear alert and a recommended action to avoid or mitigate the issue."
+            },
+            {
+                "role": "user",
+                "content": obstacle_description
+            }
+        ]
+    )
+    
+    notification_message = response.choices[0].message.content
+    st.warning(f"⚠️ Alert: {notification_message}")
+    return notification_message
