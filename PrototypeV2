@@ -1,7 +1,6 @@
 from openai import OpenAI
-
 import streamlit as st
-
+import base64
 client = OpenAI(api_key="API KEY HERE") 
 
 # create a text wrapper function
@@ -100,46 +99,44 @@ def send_notification(obstacle_description):
     return notification_message
 
 # FUNCTION 4: Computer Vision
+st.title("Street Repair and Pothole Detection")
+st.write("Upload an image of a street, and our AI will analyze it for signs of potholes or street repairs.")
 
-def encode_image(image_path):
-  with open(image_path, "rb") as image_file:
-    return base64.b64encode(image_file.read()).decode('utf-8')
+uploaded_file = st.file_uploader("Upload an image", type=None, accept_multiple_files=False)
 
-uploaded_file = st.file_uploader("Choose a picture file", type=["png", "jpg", "jpeg"])
+if uploaded_file:
+    st.image(uploaded_file, caption="Uploaded Image", use_container_width=True)
 
-openai.api_key = os.environ["OPENAI_API_KEY"]
-client = OpenAI()
+    # Convert image to base64
+    image_bytes = uploaded_file.read()
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-image_path = "images/cloud.png"
+    # Ask OpenAI to analyze the image
+    with st.spinner("Analyzing the image using our vision tool!"):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Does this image show any signs of potholes or in need of street repairs? If so, provide a list of noticiable artifacts in the image that show signs of `potholes` or `street repairs`. Additionally in a separate list, provide a list of action items that can be taken to resolve the issues."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=1000,
+            )
 
-def photo_rec(image_path):
-    base64_image = encode_image(image_path)
-    response = client.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[
-        {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "What’s in this image in terms of obstructions on the road?"},
-            {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/png;base64,{base64_image}",
-            },
-            },
-        ],
-        }
-    ],
-    max_tokens=300,
-    )
-    return response.choices[0].message.content
+            result = response.choices[0].message.content
+            st.subheader("Analysis Result:")
+            st.write(result)
 
+        except Exception as e:
+            st.error(f"Error analyzing image: {e}")
 
-if uploaded_file is not None:
-    with open(os.path.join('images',uploaded_file.name), 'wb') as f:
-        f.write(uploaded_file.getbuffer())
-    st.success("Saved File:{} to images".format(uploaded_file.name))
-    image_path = os.path.join('images',uploaded_file.name)
-    st.image(image_path)
-    content = photo_rec(image_path)
-    st.write(content)
