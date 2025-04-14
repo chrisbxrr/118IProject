@@ -1,1 +1,46 @@
+from openai import OpenAI
+import streamlit as st
+import base64
+client = OpenAI(api_key="API KEY HERE") 
 
+# FUNCTION 1: Computer Vision
+st.title("Street Repair and Pothole Detection")
+st.write("Upload an image of a street, and our AI will analyze it for signs of potholes or street repairs.")
+
+uploaded_file = st.file_uploader("Upload an image", type=None, accept_multiple_files=False)
+
+if uploaded_file:
+    st.image(uploaded_file, caption="Uploaded Image", use_container_width=True)
+
+    # Convert image to base64
+    image_bytes = uploaded_file.read()
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+    # Ask OpenAI to analyze the image
+    with st.spinner("Analyzing the image using our vision tool!"):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4-turbo",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Does this image show any signs of potholes or in need of street repairs? If so, provide a list of noticiable artifacts in the image that show signs of `potholes` or `street repairs`. Additionally in a separate list, provide a list of action items that can be taken to resolve the issues."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=1000,
+            )
+
+            result = response.choices[0].message.content
+            st.subheader("Analysis Result:")
+            st.write(result)
+
+        except Exception as e:
+            st.error(f"Error analyzing image: {e}")
