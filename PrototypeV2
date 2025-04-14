@@ -3,102 +3,7 @@ import streamlit as st
 import base64
 client = OpenAI(api_key="API KEY HERE") 
 
-# create a text wrapper function
-def get_completion(prompt, model="gpt-3.5-turbo"):
-  completion = client.chat.completions.create(
-      model=model,
-      messages=[
-      {"role": "system", "content":"You are a recycling expert who knows where to dispose of different types of waste materials. Provide a list of appropriate disposal methods and areas that the prompt contains."},
-      {"role": "user", "content": prompt},
-      ]
-  )
-  return completion.choices[0].message.content
-
-st.title("Recycling Expert Chatbot")
-with st.form(key='chat'):
-  user_input = st.text_input("Ask me a question about what garbage is blocking your path currently and I will list some appropriate to dispose of it.")
-  submit_button = st.form_submit_button(label='Submit')
-
-  if submit_button:
-    response = get_completion(user_input)
-    st.write(response)
-
-## FUNCTION 2
-
-def transcribe_audio(audio_file_path):
-    audio_file = open(audio_file_path, "rb")
-    transcription = client.audio.transcriptions.create(
-        model="whisper-1", 
-        file=audio_file
-    )
-    return transcription.text
-
-def key_points_extraction(transcription):
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        temperature=0,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a proficient AI with a specialty in distilling information into key points. Based on the following text, identify and list the main points that were discussed or brought up. These should be the most important ideas, findings, or topics that are crucial to the essence of the discussion. Your goal is to provide a list that someone could read to quickly understand what was talked about."
-            },
-            {
-                "role": "user",
-                "content": transcription
-            }
-        ]
-    )
-    return response.choices[0].message.content
-
-def action_item_extraction(transcription):
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        temperature=0,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are an AI expert in analyzing text extracting action items. Please review the text and identify and extract actionable steps from audio reports to address urban blight and safety hazards by identifying issues, assigning tasks, and prioritizing resolutions. Please list these action items clearly and concisely."
-            },
-            {
-                "role": "user",
-                "content": transcription
-            }
-        ]
-    )
-    return response.choices[0].message.content
-
-# FUNCTION 3: NOTIFICATIONS
-def send_notification(obstacle_description):
-    """
-    Notifies users about detected objects, hazards, or obstacles 
-    and provides suggestions for the best course of action.
-    
-    Parameters:
-    - obstacle_description (str): Description of the detected obstacle or hazard.
-    
-    Returns:
-    - str: A notification message with a suggested action.
-    """
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        temperature=0,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are an AI assistant that helps users navigate obstacles safely. Based on the described hazard or obstacle, provide a clear alert and a recommended action to avoid or mitigate the issue."
-            },
-            {
-                "role": "user",
-                "content": obstacle_description
-            }
-        ]
-    )
-    
-    notification_message = response.choices[0].message.content
-    st.warning(f"⚠️ Alert: {notification_message}")
-    return notification_message
-
-# FUNCTION 4: Computer Vision
+# FUNCTION 1: Computer Vision
 st.title("Street Repair and Pothole Detection")
 st.write("Upload an image of a street, and our AI will analyze it for signs of potholes or street repairs.")
 
@@ -139,4 +44,58 @@ if uploaded_file:
 
         except Exception as e:
             st.error(f"Error analyzing image: {e}")
+
+# Function 2: Text Generation
+client = OpenAI(api_key="OPENAI_API_KEY") 
+
+# create function
+def get_completion(prompt, model="gpt-3.5-turbo"): 
+   completion = client.chat.completions.create(
+        model=model,
+        messages=[
+        {"role": "system", "content": "You assist San Jose residents in reporting road obstructions, illegal dumping, and public blight.\nGiven a user description, determine if it’s an emergency:\n- If emergency (e.g., live wires, debris blocking highways, dangerous substances), tell the user to call 911.\n- If non-emergency, provide the correct contact:\n  - Road issues: San José Dept. of Transportation\n  - Waste/blight: Environmental Services Dept.\n  - General issues: Report via My San Jose app or https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé\nGive clear next steps, include relevant phone numbers or links, and keep responses helpful and direct."}, 
+        {"role": "user", "content": prompt},
+        ]
+    )
+   return completion.choices[0].message.content
+
+# create streamlit app
+with st.form(key = "chat"):
+    prompt = st.text_input("Please describe the obstruction you wish to report.") # TODO!
+    
+    submitted = st.form_submit_button("Submit")
+    
+    if submitted:
+        st.write(get_completion(prompt))
+
+# FUNCTION 3: NOTIFICATIONS
+def send_notification(obstacle_description):
+    """
+    Notifies users about detected objects, hazards, or obstacles 
+    and provides suggestions for the best course of action.
+    
+    Parameters:
+    - obstacle_description (str): Description of the detected obstacle or hazard.
+    
+    Returns:
+    - str: A notification message with a suggested action.
+    """
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an AI assistant that helps users navigate obstacles safely. Based on the described hazard or obstacle, provide a clear alert and a recommended action to avoid or mitigate the issue."
+            },
+            {
+                "role": "user",
+                "content": obstacle_description
+            }
+        ]
+    )
+    
+    notification_message = response.choices[0].message.content
+    st.warning(f"⚠️ Alert: {notification_message}")
+    return notification_message
 
