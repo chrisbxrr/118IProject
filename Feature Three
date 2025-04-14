@@ -1,0 +1,30 @@
+# FUNCTION 3: NOTIFICATIONS
+def send_notification(obstacle_description):
+    """
+    Notifies users about detected objects, hazards, or obstacles 
+    and provides suggestions for the best course of action.
+    
+    Parameters:
+    - obstacle_description (str): Description of the detected obstacle or hazard.
+    
+    Returns:
+    - str: A notification message with a suggested action.
+    """
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an AI assistant that helps users navigate obstacles safely. Based on the described hazard or obstacle, provide a clear alert and a recommended action to avoid or mitigate the issue."
+            },
+            {
+                "role": "user",
+                "content": obstacle_description
+            }
+        ]
+    )
+    
+    notification_message = response.choices[0].message.content
+    st.warning(f"⚠️ Alert: {notification_message}")
+    return notification_message
