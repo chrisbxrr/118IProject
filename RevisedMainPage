@@ -1,0 +1,48 @@
+from openai import OpenAI
+import streamlit as st
+
+# Set page config
+st.set_page_config(page_title="Path Guardian", layout="centered")
+
+# Initialize warning acknowledgment state
+if 'warning_acknowledged' not in st.session_state:
+    st.session_state.warning_acknowledged = False
+
+def show_warning():
+    st.markdown("<h3 style='text-align: center; color: red;'>⚠️ WARNING ⚠️</h3>", unsafe_allow_html=True)
+    st.warning(
+        "⚠️ This application is intended for cyclists and STOPPED vehicles. Please proceed only if you are in a safe environment. "
+        "Do not use while driving or in motion. By clicking 'I Understand', you acknowledge that you are in a safe environment and agree to use this application responsibly."
+    )
+    if st.button("I Understand"):
+        st.session_state.warning_acknowledged = True
+        st.rerun()  # Updated method
+
+def show_main_content():
+    # Title
+    st.markdown("<h1 style='text-align: center; font-size: 60px;'>🛣️ Path Guardian</h1>", unsafe_allow_html=True)
+
+    # Subtitle
+    st.markdown("<h3 style='text-align: center; color: gray;'>Protecting Your Commute – One Report at a Time</h3>", unsafe_allow_html=True)
+
+    # Description
+    st.markdown("""
+    <div style='text-align: center; font-size: 18px; padding-top: 20px;'>
+    Welcome to Path Guardian, your go-to app for reporting potholes and road hazards.  
+    Click "Next" to start reporting and viewing current hazards on your city's map.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Tutorial Video
+    st.subheader("Here's a tutorial to use PathGuardianAI!", divider='grey')
+    VIDEO_URL = "https://pixabay.com/en/videos/star-long-exposure-starry-sky-sky-6962/"
+    st.video(VIDEO_URL)
+
+    st.write("This application is designed to help you identify and manage obstacles in your path, whether they are physical objects or digital challenges.")
+    st.write("Please select a function from the sidebar to get started.")
+
+# Run warning or main content
+if not st.session_state.warning_acknowledged:
+    show_warning()
+else:
+    show_main_content()
