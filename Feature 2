@@ -11,18 +11,25 @@ def get_completion(prompt, model="gpt-3.5-turbo"):
    completion = client.chat.completions.create(
         model=model,
         messages=[
-        {"role": "system", "content": "You assist San Jose residents in reporting road obstructions, illegal dumping, and public blight.\nGiven a user description, determine if it’s an emergency:\n- If emergency (e.g., live wires, debris blocking highways, dangerous substances), tell the user to call 911.\n- If non-emergency, provide the correct contact:\n  - Road issues: San José Dept. of Transportation\n  - Waste/blight: Environmental Services Dept.\n  - General issues: Report via My San Jose app or https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé\nGive clear next steps, include relevant phone numbers or links, and keep responses helpful and direct."}, 
+        {"role": "system", "content": "You assist San Jose residents in reporting road obstructions, illegal dumping, and public blight.\nGiven a user description, determine if it’s an emergency:\n- If emergency (e.g., live wires, debris blocking roads, dangerous substances), tell the user to call 911.\n- If non-emergency, provide the correct contact:\n  - Road issues: San José Dept. of Transportation\n  - Waste/blight: Environmental Services Dept.\n  - General issues: Report via My San Jose app or https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé\nGive clear next steps, include relevant phone numbers or links, and keep responses helpful and direct."}, 
         {"role": "user", "content": prompt},
         ]
     )
    return completion.choices[0].message.content
 
-# create streamlit app
-with st.form(key = "chat"):
-    prompt = st.text_input("Please describe the obstruction you wish to report.") # TODO!
-    
-    submitted = st.form_submit_button("Submit")
-    
-    if submitted:
-        st.write(get_completion(prompt))
 
+# Streamlit UI
+st.set_page_config(page_title="City Resources", page_icon="🏙️")
+st.title("Connect with San Jose Resources")
+st.write("Describe the issue you encountered. Our assistant will help determine the next steps and who to contact.")
+
+# Form for user input
+with st.form(key="report_form"):
+    prompt = st.text_area("What's the issue?", placeholder="e.g., There's a mattress and trash pile near 4th and Santa Clara St.")
+    submitted = st.form_submit_button("Submit Report")
+
+    if submitted and prompt:
+        with st.spinner("Analyzing your report..."):
+            response = get_completion(prompt)
+        st.markdown("### 📝 Response")
+        st.success(response)
