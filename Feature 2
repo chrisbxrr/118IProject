@@ -1,9 +1,8 @@
-from openai import OpenAI
-import streamlit as st
-import base64
-client = OpenAI(api_key="API KEY HERE") 
 
-# Function 2: Text Generation
+import os
+import streamlit as st 
+from openai import OpenAI
+
 client = OpenAI(api_key="OPENAI_API_KEY") 
 
 # create function
@@ -11,7 +10,7 @@ def get_completion(prompt, model="gpt-3.5-turbo"):
    completion = client.chat.completions.create(
         model=model,
         messages=[
-        {"role": "system", "content": "You assist San Jose residents in reporting road obstructions, illegal dumping, and public blight.\nGiven a user description, determine if it’s an emergency:\n- If emergency (e.g., live wires, debris blocking roads, dangerous substances), tell the user to call 911.\n- If non-emergency, provide the correct contact:\n  - Road issues: San José Dept. of Transportation\n  - Waste/blight: Environmental Services Dept.\n  - General issues: Report via My San Jose app or https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé\nGive clear next steps, include relevant phone numbers or links, and keep responses helpful and direct."}, 
+        {"role": "system", "content": "You assist San Jose residents in reporting road obstructions, illegal dumping, and public blight.\nGiven a user description, determine if it’s an emergency:\n- If emergency (e.g., live wires, debris blocking highways, dangerous substances), tell the user to call 911.\n- If non-emergency, provide the correct contact:\n  - Road issues: San José Dept. of Transportation\n  - Waste/blight: Environmental Services Dept.\n  - General issues: Report via My San Jose app or https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé\nGive clear next steps, include relevant phone numbers or links, and keep responses helpful and direct."}, 
         {"role": "user", "content": prompt},
         ]
     )
