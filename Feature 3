@@ -1,3 +1,4 @@
+
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
@@ -34,7 +35,7 @@ hazard_types = {
 main_col, right_sidebar_col = st.columns([7, 3])
 
 with main_col:
-    st.title("🚧 Road Hazard Reporting App")
+    st.title("PathGuardian")
     
     # Create tabs for different functionalities
     tab1, tab2, tab3 = st.tabs(["📝 Report Hazard", "🗺️ View Hazards", "📊 Analytics"])
