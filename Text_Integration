@@ -1,0 +1,340 @@
+import streamlit as st
+import folium
+from streamlit_folium import st_folium
+import pandas as pd
+import numpy as np
+import datetime
+from folium.plugins import MarkerCluster
+from openai import OpenAI
+
+# App title and setup
+st.set_page_config(page_title="Road Hazard Reporter", layout="wide")
+
+# Initialize OpenAI client - Note: In production, use st.secrets or environment variables
+client = OpenAI(api_key="OPENAI_API_KEY")  # Replace with your actual API key
+
+# Function for text generation using OpenAI
+def get_completion(prompt, model="gpt-3.5-turbo"): 
+   completion = client.chat.completions.create(
+        model=model,
+        messages=[
+        {"role": "system", "content": "You assist San Jose residents in reporting road obstructions, illegal dumping, and public blight.\nGiven a user description, determine if it's an emergency:\n- If emergency (e.g., live wires, debris blocking roads, dangerous substances), tell the user to call 911.\n- If non-emergency, provide the correct contact:\n  - Road issues: San José Dept. of Transportation\n  - Waste/blight: Environmental Services Dept.\n  - General issues: Report via My San Jose app or https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé\nGive clear next steps, include relevant phone numbers or links, and keep responses helpful and direct."}, 
+        {"role": "user", "content": prompt},
+        ]
+    )
+   return completion.choices[0].message.content
+
+# Initialize session state variables
+if 'reports' not in st.session_state:
+    st.session_state.reports = []
+if 'active_tab' not in st.session_state:
+    st.session_state.active_tab = "Report"
+
+# Set a default location for the map (San Jose, California)
+default_location = [37.3382, -121.8863]  # Coordinates for San Jose, California
+
+# Define hazard types and their icons
+hazard_types = {
+    "Pothole": "⚠️",
+    "Traffic Jam": "🚗",
+    "Construction": "🚧",
+    "Accident": "🚨",
+    "Flooded Road": "💧",
+    "Debris on Road": "🗑️",
+    "Damaged Sign": "🚸",
+    "Closed Lane": "🚫"
+}
+
+# Create main layout with sidebar on right
+main_col, right_sidebar_col = st.columns([7, 3])
+
+with main_col:
+    st.title("🚧 Road Hazard Reporting App")
+    
+    # Create tabs for different functionalities
+    tab1, tab2, tab3 = st.tabs(["📝 Report Hazard", "🗺️ View Hazards", "📊 Analytics & Resources"])
+    
+    with tab1:
+        st.markdown("""
+        ### Report a Road Hazard
+        Click on the map to select a location where you've encountered a road hazard.  
+        Then provide details about the hazard and submit your report.
+        """)
+        
+        # Create the map for reporting
+        m_report = folium.Map(location=default_location, zoom_start=13)
+        
+        # Add existing hazards to the map
+        if st.session_state.reports:
+            marker_cluster = MarkerCluster().add_to(m_report)
+            for report in st.session_state.reports:
+                icon_color = "red" if report["severity"] == "High" else "orange" if report["severity"] == "Medium" else "green"
+                folium.Marker(
+                    [report["lat"], report["lon"]], 
+                    popup=f"{report['hazard_type']}: {report['description']}",
+                    icon=folium.Icon(color=icon_color)
+                ).add_to(marker_cluster)
+        
+        # Render the map and capture user interaction
+        map_data = st_folium(m_report, width=700, height=500, returned_objects=["last_clicked"])
+        
+        # If user clicks on the map
+        if map_data["last_clicked"] is not None:
+            clicked_lat = map_data["last_clicked"]["lat"]
+            clicked_lon = map_data["last_clicked"]["lng"]
+            
+            st.success(f"📍 Selected Location: ({clicked_lat:.5f}, {clicked_lon:.5f})")
+            
+            # Form for hazard details
+            with st.form("hazard_report_form"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    hazard_type = st.selectbox("Hazard Type", list(hazard_types.keys()))
+                    severity = st.select_slider("Severity", options=["Low", "Medium", "High"])
+                
+                with col2:
+                    description = st.text_area("Description of the hazard:")
+                    image = st.file_uploader("Upload an image (optional)", type=["jpg", "jpeg", "png"])
+                
+                # Submit button
+                submitted = st.form_submit_button("Submit Report")
+                if submitted:
+                    # Create and save the report
+                    new_report = {
+                        "id": len(st.session_state.reports) + 1,
+                        "lat": clicked_lat,
+                        "lon": clicked_lon,
+                        "hazard_type": hazard_type,
+                        "severity": severity,
+                        "description": description,
+                        "image": image is not None,
+                        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "votes": 1,
+                        "status": "Reported"
+                    }
+                    
+                    st.session_state.reports.append(new_report)
+                    st.success("✅ Hazard report submitted!")
+                    st.write(f"**Location:** ({clicked_lat:.5f}, {clicked_lon:.5f})")
+                    st.write(f"**Hazard Type:** {hazard_type} {hazard_types[hazard_type]}")
+                    st.write(f"**Description:** {description}")
+                    st.write(f"**Severity:** {severity}")
+        else:
+            st.info("Click on the map above to mark the location of a road hazard.")
+    
+    with tab2:
+        st.markdown("### View All Reported Hazards")
+        
+        # Get filter values from session state (set in right sidebar)
+        filter_type = st.session_state.get('filter_type', list(hazard_types.keys()))
+        filter_severity = st.session_state.get('filter_severity', ["Low", "Medium", "High"])
+        
+        # Create a visualization map for all reports
+        m_view = folium.Map(location=default_location, zoom_start=12)
+        
+        # Filter reports
+        filtered_reports = [r for r in st.session_state.reports if r["hazard_type"] in filter_type and r["severity"] in filter_severity]
+        
+        # Create marker clusters for better visualization
+        marker_cluster = MarkerCluster().add_to(m_view)
+        
+        # Add filtered hazards to the map
+        for report in filtered_reports:
+            icon_color = "red" if report["severity"] == "High" else "orange" if report["severity"] == "Medium" else "green"
+            popup_html = f"""
+            <b>{report['hazard_type']}</b><br>
+            Description: {report['description']}<br>
+            Severity: {report['severity']}<br>
+            Reported: {report['timestamp']}<br>
+            Status: {report['status']}<br>
+            <button onclick="alert('You upvoted this report!')">Upvote ({report['votes']})</button>
+            """
+            
+            folium.Marker(
+                [report["lat"], report["lon"]], 
+                popup=folium.Popup(popup_html, max_width=300),
+                icon=folium.Icon(color=icon_color, icon="info-sign")
+            ).add_to(marker_cluster)
+        
+        # Display the map
+        st_folium(m_view, width=700, height=500)
+        
+        # List view of reports
+        st.subheader("List of Reports")
+        if filtered_reports:
+            for i, report in enumerate(filtered_reports):
+                with st.expander(f"{report['hazard_type']} - {report['timestamp']}"):
+                    st.write(f"**Location:** ({report['lat']:.5f}, {report['lon']:.5f})")
+                    st.write(f"**Description:** {report['description']}")
+                    st.write(f"**Severity:** {report['severity']}")
+                    st.write(f"**Status:** {report['status']}")
+                    
+                    col1, col2 = st.columns([1, 1])
+                    with col1:
+                        if st.button(f"👍 Upvote ({report['votes']})", key=f"upvote_{i}"):
+                            report['votes'] += 1
+                            st.success("Upvoted!")
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button(f"✅ Mark Resolved", key=f"resolve_{i}"):
+                            report['status'] = "Resolved"
+                            st.success("Marked as resolved!")
+                            st.rerun()
+        else:
+            st.info("No reports match the current filters.")
+    
+    with tab3:
+        # Create sub-tabs to separate analytics and city resources
+        analytics_tab, resources_tab = st.tabs(["📈 Analytics Dashboard", "🏙️ City Resources"])
+        
+        with analytics_tab:
+            st.markdown("### Analytics Dashboard")
+            
+            if not st.session_state.reports:
+                st.info("No reports available for analysis.")
+            else:
+                # Create summary statistics
+                total_reports = len(st.session_state.reports)
+                active_reports = len([r for r in st.session_state.reports if r["status"] == "Reported"])
+                resolved_reports = len([r for r in st.session_state.reports if r["status"] == "Resolved"])
+                
+                # Display stats
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Reports", total_reports)
+                col2.metric("Active Reports", active_reports)
+                col3.metric("Resolved Reports", resolved_reports)
+                
+                # Create hazard type distribution
+                hazard_counts = {}
+                for report in st.session_state.reports:
+                    hazard_type = report["hazard_type"]
+                    hazard_counts[hazard_type] = hazard_counts.get(hazard_type, 0) + 1
+                
+                # Create a dataframe for the chart
+                hazard_df = pd.DataFrame({
+                    'Hazard Type': list(hazard_counts.keys()),
+                    'Count': list(hazard_counts.values())
+                })
+                
+                # Plot the chart
+                st.subheader("Hazard Type Distribution")
+                st.bar_chart(hazard_df.set_index('Hazard Type'))
+                
+                # Severity distribution
+                severity_counts = {
+                    "Low": len([r for r in st.session_state.reports if r["severity"] == "Low"]),
+                    "Medium": len([r for r in st.session_state.reports if r["severity"] == "Medium"]),
+                    "High": len([r for r in st.session_state.reports if r["severity"] == "High"])
+                }
+                
+                severity_df = pd.DataFrame({
+                    'Severity': list(severity_counts.keys()),
+                    'Count': list(severity_counts.values())
+                })
+                
+                st.subheader("Severity Distribution")
+                st.bar_chart(severity_df.set_index('Severity'))
+        
+        with resources_tab:
+            st.markdown("### Connect with San Jose Resources")
+            st.write("Describe the issue you encountered. Our assistant will help determine the next steps and who to contact.")
+            
+            # Form for user input to connect with city resources
+            with st.form(key="city_resources_form"):
+                prompt = st.text_area("What's the issue?", placeholder="e.g., There's a mattress and trash pile near 4th and Santa Clara St.")
+                submitted = st.form_submit_button("Submit Report")
+                
+                if submitted and prompt:
+                    with st.spinner("Analyzing your report..."):
+                        response = get_completion(prompt)
+                    st.markdown("### 📝 Response")
+                    st.success(response)
+            
+            # Display additional city resources
+            st.markdown("### Additional Resources")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("""
+                **Emergency Services:**
+                - Police (Non-emergency): 408-277-8900
+                - Fire (Non-emergency): 408-277-8950
+                - Road Emergencies: 911
+                """)
+            
+            with col2:
+                st.markdown("""
+                **Department Contacts:**
+                - Dept. of Transportation: 408-535-3850
+                - Environmental Services: 408-535-8550
+                - Public Works: 408-535-8300
+                """)
+            
+            st.markdown("""
+            **Online Services:**
+            - [My San Jose App](https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé)
+            - [Report Illegal Dumping](https://www.sanjoseca.gov/your-government/departments-offices/environmental-services/anti-graffiti-litter-program/report-illegal-dumping)
+            - [Traffic Signal Issues](https://www.sanjoseca.gov/your-government/departments-offices/transportation/roads/traffic-signals)
+            """)
+
+# Right sidebar (using a column)
+with right_sidebar_col:
+    # Add a border and styling to make it look like a sidebar
+    st.markdown("""
+    <div style="border-left: 1px solid #e6e6e6; padding-left: 10px; height: 100%">
+    """, unsafe_allow_html=True)
+    
+    st.header("📢 Live Traffic Alerts")
+    
+    # Display sample alerts or real ones if available
+    sample_alerts = [
+        {"message": "Accident on Highway 101 northbound", "time": "10 minutes ago"},
+        {"message": "Construction on 4th Street near downtown", "time": "30 minutes ago"},
+        {"message": "Heavy traffic on I-280 due to lane closure", "time": "45 minutes ago"}
+    ]
+    
+    for alert in sample_alerts:
+        st.warning(f"{alert['message']} - {alert['time']}")
+    
+    # Filter options for the View Hazards tab
+    st.header("Filter Options")
+    
+    # Store filter selections in session state so they're available in the main content
+    st.session_state['filter_type'] = st.multiselect(
+        "Hazard Type", 
+        list(hazard_types.keys()), 
+        default=list(hazard_types.keys())
+    )
+    
+    st.session_state['filter_severity'] = st.multiselect(
+        "Severity", 
+        ["Low", "Medium", "High"], 
+        default=["Low", "Medium", "High"]
+    )
+    
+    # Allow users to subscribe to alerts
+    st.header("Get Traffic Alerts")
+    alert_email = st.text_input("Email address:")
+    alert_phone = st.text_input("Phone number (optional):")
+    alert_zipcode = st.text_input("Enter your Zip Code:")
+    alert_radius = st.slider("Alert radius (miles)", 1, 50, 10)
+    
+    if st.button("Subscribe to Alerts"):
+        st.success("You've been subscribed to traffic alerts!")
+        
+    # Add a button to create a new traffic alert
+    st.header("Report Traffic Alert")
+    if st.button("Create New Traffic Alert"):
+        st.info("Click on the map in the Report tab to create a new traffic alert")
+    
+    # Show app info
+    st.markdown("---")
+    st.info("""
+    This app allows citizens to report and track road hazards like potholes, traffic jams, and construction. 
+    Together we can make our roads safer!
+    """)
+    
+    # Close the styling div
+    st.markdown("</div>", unsafe_allow_html=True)
