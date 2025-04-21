@@ -1,0 +1,386 @@
+import streamlit as st
+from openai import OpenAI
+import base64
+import datetime
+import folium
+from folium.plugins import MarkerCluster
+from streamlit_folium import st_folium
+import pandas as pd
+from geopy.geocoders import Nominatim
+import requests
+
+# —— Page config —— #
+st.set_page_config(page_title="🚧 Road Hazard Reporter", layout="wide")
+
+# —— Geocoder + Overpass for extracting intersections —— #
+geolocator = Nominatim(user_agent="road-hazard-reporter")
+def get_intersection(lat, lon):
+    overpass_url = "http://overpass-api.de/api/interpreter"
+    query = f"""
+      [out:json];
+      way(around:50,{lat},{lon})["highway"]["name"];
+      out tags;
+    """
+    try:
+        resp = requests.post(overpass_url, data=query, timeout=10).json()
+        roads = []
+        for el in resp.get("elements", []):
+            name = el.get("tags", {}).get("name")
+            if name and name not in roads:
+                roads.append(name)
+            if len(roads) == 2:
+                return f"{roads[0]} & {roads[1]}"
+        if len(roads) == 1:
+            return roads[0]
+    except:
+        pass
+    try:
+        loc = geolocator.reverse((lat, lon), exactly_one=True, zoom=18, timeout=10)
+        return loc.raw.get("display_name", "").split(",")[0]
+    except:
+        return f"{lat:.5f}, {lon:.5f}"
+
+# —— OpenAI clients —— #
+client = OpenAI(api_key="OPENAI-API-KEY-HERE")
+def classify_hazard(image_bytes):
+    img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    resp = client.chat.completions.create(
+        model="gpt-4-turbo",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type":"text","text":(
+                    "What hazard type is shown in this image? "
+                    "Choose one from: Pothole, Traffic Jam, Construction, Accident, "
+                    "Flooded Road, Debris on Road, Damaged Sign, Closed Lane. "
+                    "Only reply with that hazard type."
+                )},
+                {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{img_b64}"}}
+            ]
+        }],
+        max_tokens=10
+    )
+    return resp.choices[0].message.content.strip()
+
+# —— Text‑analysis integration for tab3 resources —— #
+SYSTEM_PROMPT = """You assist San Jose residents in reporting road obstructions, illegal dumping, and public blight.
+Given a user description, determine if it's an emergency:
+- If emergency (e.g., live wires, debris blocking roads, dangerous substances), tell the user to call 911.
+- If non-emergency, provide the correct contact:
+  - Road issues: San José Dept. of Transportation
+  - Waste/blight: Environmental Services Dept.
+  - General issues: Report via My San José app or https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé
+Give clear next steps, include relevant phone numbers or links, and keep responses helpful and direct."""
+def get_completion(prompt: str, model="gpt-3.5-turbo") -> str:
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt}
+        ]
+    )
+    return resp.choices[0].message.content
+
+# —— Session state initialization —— #
+ss = st.session_state
+if "reports" not in ss:         ss.reports = []
+if "awaiting_auto" not in ss:   ss.awaiting_auto = False
+if "just_submitted_auto" not in ss: ss.just_submitted_auto = False
+if "alerts" not in ss:          ss.alerts = []
+if "filter_type" not in ss:     ss.filter_type = []
+if "filter_severity" not in ss: ss.filter_severity = []
+
+# —— Constants —— #
+default_location = [37.3382, -121.8863]
+hazard_types = {
+    "Pothole":"⚠️","Traffic Jam":"🚗","Construction":"🚧","Accident":"🚨",
+    "Flooded Road":"💧","Debris on Road":"🗑️","Damaged Sign":"🚸","Closed Lane":"🚫"
+}
+
+# —— Layout: main + right columns —— #
+main_col, right_col = st.columns([7, 3])
+
+# —— Right column: Live Alerts & Filters —— #
+with right_col:
+    st.header("📢 Live Traffic Alerts")
+    if ss.alerts:
+        for a in ss.alerts[:5]:
+            st.warning(f"{a['message']} — {a['time']}")
+    else:
+        st.info("No traffic alerts yet.")
+    st.markdown("---")
+    st.header("Filter Options")
+    ss.filter_type = st.multiselect(
+        "Hazard Type", list(hazard_types.keys()),
+        default=list(hazard_types.keys())
+    )
+    ss.filter_severity = st.multiselect(
+        "Severity", ["Low","Medium","High"],
+        default=["Low","Medium","High"]
+    )
+
+# —— Main column: Title & Tabs —— #
+with main_col:
+    st.title("🚧 Road Hazard Reporting App")
+    tab1, tab2, tab3 = st.tabs([
+        "📝 Report Hazard", "🗺️ View Hazards", "📊 Analytics & Resources"
+    ])
+
+    # --- Tab 1: Report Hazard --- #
+    with tab1:
+        st.markdown("### Report a Road Hazard")
+        if ss.pop("just_submitted_auto", False):
+            st.success("✅ Hazard Report Submitted!")
+
+        mode = st.radio(
+            "Choose a reporting mode:",
+            ["Manual Report", "Automatic Hazard Detection"],
+            horizontal=True
+        )
+
+        # Manual Report
+        if mode == "Manual Report":
+            m = folium.Map(location=default_location, zoom_start=13)
+            mc = MarkerCluster().add_to(m)
+            for r in ss.reports:
+                folium.Marker(
+                    [r["lat"], r["lon"]],
+                    popup=f"{r['hazard_type']}: {r['description']}",
+                    icon=folium.Icon(
+                        color="red" if r["severity"]=="High" else
+                              "orange" if r["severity"]=="Medium" else
+                              "green"
+                    )
+                ).add_to(mc)
+
+            clicked = st_folium(m, width=700, height=500, returned_objects=["last_clicked"])
+            if clicked["last_clicked"]:
+                lat, lon = clicked["last_clicked"]["lat"], clicked["last_clicked"]["lng"]
+                intersection = get_intersection(lat, lon)
+                st.success(f"📍 Nearest Intersection: **{intersection}**")
+
+                with st.form("manual_form"):
+                    ht   = st.selectbox("Hazard Type", list(hazard_types.keys()))
+                    sev  = st.select_slider("Severity", ["Low","Medium","High"])
+                    desc = st.text_area("Description")
+                    img  = st.file_uploader("Upload an image (optional)", type=["jpg","jpeg","png"])
+                    sub  = st.form_submit_button("Submit Report")
+
+                if sub:
+                    img_bytes = img.read() if img else None
+                    if img_bytes:
+                        with st.spinner("Classifying…"):
+                            pred = classify_hazard(img_bytes)
+                        if pred in hazard_types:
+                            st.success(f"🔍 Auto‑classified as: {pred}")
+                            ht = pred
+
+                    rpt = {
+                        "id": len(ss.reports) + 1,
+                        "lat": lat, "lon": lon,
+                        "hazard_type": ht, "severity": sev,
+                        "description": desc,
+                        "image_bytes": img_bytes,
+                        "image_name": img.name if img else None,
+                        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "votes": 1, "status": "Reported"
+                    }
+                    ss.reports.append(rpt)
+                    ss.alerts.insert(0, {
+                        "message": f"{ht} reported near {intersection}",
+                        "time":    rpt["timestamp"]
+                    })
+                    st.success("✅ Hazard report submitted!")
+                    st.rerun()
+
+        # Automatic Hazard Detection
+        else:
+            if not ss.awaiting_auto:
+                m2 = folium.Map(location=default_location, zoom_start=13)
+                sel = st_folium(
+                    m2, width=700, height=500,
+                    returned_objects=["last_clicked"], key="auto_map"
+                )
+                if sel["last_clicked"]:
+                    ss.auto_lat = sel["last_clicked"]["lat"]
+                    ss.auto_lon = sel["last_clicked"]["lng"]
+                    ss.awaiting_auto = True
+
+            if ss.awaiting_auto:
+                lat, lon = ss.auto_lat, ss.auto_lon
+                intersection = get_intersection(lat, lon)
+                st.success(f"📍 Nearest Intersection: **{intersection}**")
+
+                img2 = st.file_uploader(
+                    "Upload an image to auto‑detect the hazard",
+                    type=["jpg","jpeg","png"], key="auto_img"
+                )
+                if img2:
+                    if "auto_bytes" not in ss:
+                        bts = img2.read()
+                        with st.spinner("Classifying…"):
+                            ss.auto_pred = classify_hazard(bts)
+                        ss.auto_bytes = bts
+
+                    pred = ss.auto_pred
+                    if pred in hazard_types:
+                        st.success(f"🔍 Classified: **{pred}** {hazard_types[pred]}")
+
+                        with st.form("auto_form"):
+                            sev2  = st.select_slider("Severity", ["Low","Medium","High"])
+                            notes = st.text_area("Additional notes (optional)")
+                            sub2  = st.form_submit_button("Submit Auto‑Report")
+
+                        if sub2:
+                            rpt = {
+                                "id": len(ss.reports) + 1,
+                                "lat": lat, "lon": lon,
+                                "hazard_type": pred, "severity": sev2,
+                                "description": notes,
+                                "image_bytes": ss.auto_bytes,
+                                "image_name": img2.name,
+                                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "votes": 1, "status": "Reported"
+                            }
+                            ss.reports.append(rpt)
+                            ss.alerts.insert(0, {
+                                "message": f"{pred} reported near {intersection}",
+                                "time":    rpt["timestamp"]
+                            })
+                            for k in ["awaiting_auto","auto_pred","auto_bytes"]:
+                                ss.pop(k, None)
+                            ss.just_submitted_auto = True
+                            st.rerun()
+
+    # --- Tab 2: View Hazards --- #
+    with tab2:
+        st.markdown("### View All Reported Hazards")
+        m_view = folium.Map(location=default_location, zoom_start=12)
+        mc = MarkerCluster().add_to(m_view)
+
+        f_types = ss.filter_type or list(hazard_types.keys())
+        f_sevs  = ss.filter_severity or ["Low","Medium","High"]
+        filtered = [
+            r for r in ss.reports
+            if r["hazard_type"] in f_types and r["severity"] in f_sevs
+        ]
+
+        for r in filtered:
+            folium.Marker(
+                [r["lat"], r["lon"]],
+                popup=folium.Popup(
+                    f"<b>{r['hazard_type']}</b><br>"
+                    f"{r['description']}<br>"
+                    f"{r['severity']}<br>"
+                    f"{r['timestamp']}<br>"
+                    f"{r['status']}", max_width=300
+                ),
+                icon=folium.Icon(
+                    color="red" if r["severity"]=="High" else
+                          "orange" if r["severity"]=="Medium" else
+                          "green"
+                )
+            ).add_to(mc)
+
+        st_folium(m_view, width=700, height=500)
+
+        st.subheader("List of Reports")
+        if filtered:
+            for i, r in enumerate(filtered):
+                with st.expander(f"{r['hazard_type']} — {r['timestamp']}"):
+                    loc = get_intersection(r['lat'], r['lon'])
+                    st.write(f"**Location:** {loc}")
+                    if r["image_bytes"]:
+                        st.image(r["image_bytes"], caption=r["image_name"], use_container_width=True)
+                    st.write(f"**Description:** {r['description']}")
+                    st.write(f"**Severity:** {r['severity']}")
+                    st.write(f"**Status:** {r['status']}")
+                    c1, c2 = st.columns(2)
+                    if c1.button(f"👍 Upvote ({r['votes']})", key=f"up_{i}"):
+                        r["votes"] += 1
+                        st.rerun()
+                    if c2.button(f"✅ Mark Resolved", key=f"res_{i}"):
+                        r["status"] = "Resolved"
+                        st.rerun()
+        else:
+            st.info("No reports match the current filters.")
+
+    # --- Tab 3: Analytics & Resources --- #
+    with tab3:
+        analytics_tab, resources_tab = st.tabs([
+            "📈 Analytics Dashboard", "🏙️ City Resources"
+        ])
+
+        with analytics_tab:
+            st.markdown("### Analytics Dashboard")
+            if not ss.reports:
+                st.info("No reports available for analysis.")
+            else:
+                total_reports    = len(ss.reports)
+                active_reports   = len([r for r in ss.reports if r["status"]=="Reported"])
+                resolved_reports = len([r for r in ss.reports if r["status"]=="Resolved"])
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Reports", total_reports)
+                c2.metric("Active Reports", active_reports)
+                c3.metric("Resolved Reports", resolved_reports)
+
+                hazard_counts = {}
+                for r in ss.reports:
+                    hazard_counts[r["hazard_type"]] = hazard_counts.get(r["hazard_type"], 0) + 1
+                df_hazard = pd.DataFrame({
+                    "Hazard Type": list(hazard_counts.keys()),
+                    "Count":       list(hazard_counts.values())
+                }).set_index("Hazard Type")
+                st.subheader("Hazard Type Distribution")
+                st.bar_chart(df_hazard)
+
+                sev_counts = {
+                    lvl: len([r for r in ss.reports if r["severity"]==lvl])
+                    for lvl in ["Low","Medium","High"]
+                }
+                df_sev = pd.DataFrame({
+                    "Severity": list(sev_counts.keys()),
+                    "Count":    list(sev_counts.values())
+                }).set_index("Severity")
+                st.subheader("Severity Distribution")
+                st.bar_chart(df_sev)
+
+        with resources_tab:
+            st.markdown("### Connect with San Jose Resources")
+            st.write("Describe the issue you encountered, and we'll advise next steps.")
+
+            with st.form("city_resources_form"):
+                prompt = st.text_area(
+                    "What's the issue?",
+                    placeholder="e.g., There's a mattress and trash pile near 4th and Santa Clara St."
+                )
+                submitted = st.form_submit_button("Ask the Assistant")
+
+            if submitted and prompt:
+                with st.spinner("Analyzing..."):
+                    answer = get_completion(prompt)
+                st.markdown("#### 📝 Response")
+                st.success(answer)
+
+            st.markdown("### Additional Resources")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("""
+                **Emergency Services:**
+                - Police (non-emergency): 408‑277‑8900  
+                - Fire   (non-emergency): 408‑277‑8950  
+                - Road Emergencies: **911**
+                """)
+            with col2:
+                st.markdown("""
+                **Dept. Contacts:**
+                - Transportation:    408‑535‑3850  
+                - Environmental:     408‑535‑8550  
+                - Public Works:      408‑535‑8300
+                """)
+            st.markdown("""
+            **Online Reporting:**
+            - [My San José App](https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé)  
+            - [Report Illegal Dumping](https://www.sanjoseca.gov/your-government/departments-offices/environmental-services/anti-graffiti-litter-program/report-illegal-dumping)  
+            - [Traffic Signal Issues](https://www.sanjoseca.gov/your-government/departments-offices/transportation/roads/traffic-signals)
+            """)
