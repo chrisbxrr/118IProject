@@ -1,0 +1,460 @@
+import streamlit as st
+from openai import OpenAI
+import base64, datetime, requests
+import pandas as pd
+import folium
+from folium.plugins import MarkerCluster
+from streamlit_folium import st_folium
+from geopy.geocoders import Nominatim
+from dateutil import parser
+
+
+# ─── Page config ───────────────────────────────────
+st.set_page_config(page_title="🚧 Road Hazard Reporter", layout="wide")
+
+# ─── YOUR API KEYS ─────────────────────────────────
+API_511      = "01a34a02-8501-45e0-9007-032ff79ea071"
+OPENAI_TOKEN = "OPENAI_API_KEY"
+
+# ─── 511 ENDPOINTS ─────────────────────────────────
+EVENTS_URL = f"http://api.511.org/traffic/events?api_key={API_511}"
+WZDX_URL   = f"http://api.511.org/traffic/wzdx?api_key={API_511}&includeAllDefinedEnums=true"
+
+def fetch_511_events():
+    r = requests.get(EVENTS_URL, timeout=5)
+    r.encoding = "utf-8-sig"
+    return r.json().get("events", [])
+
+def fetch_511_closures():
+    r = requests.get(WZDX_URL, timeout=5)
+    r.encoding = "utf-8-sig"
+    return r.json().get("events", [])
+
+# ─── time formatting helper ─────────────────────────
+def format_time(iso_str):
+    try:
+        dt = parser.isoparse(iso_str)
+        return dt.strftime("%-I:%M %p %A, %B %-d, %Y")
+    except:
+        return iso_str or "Unknown time"
+
+# ─── geocoder helper ─────────────────────────────────
+geolocator = Nominatim(user_agent="hazard-reporter")
+def get_intersection(lat, lon):
+    q = f"""
+      [out:json];
+      way(around:50,{lat},{lon})["highway"]["name"];
+      out tags;
+    """
+    try:
+        resp = requests.post("http://overpass-api.de/api/interpreter", data=q, timeout=5).json()
+        names = []
+        for el in resp.get("elements", []):
+            nm = el.get("tags", {}).get("name")
+            if nm and nm not in names:
+                names.append(nm)
+            if len(names) == 2:
+                return f"{names[0]} & {names[1]}"
+        if names:
+            return names[0]
+    except:
+        pass
+    try:
+        loc = geolocator.reverse((lat, lon), zoom=18, timeout=5)
+        return loc.raw.get("display_name", "").split(",")[0]
+    except:
+        return f"{lat:.5f}, {lon:.5f}"
+
+# ─── OpenAI image classifier ───────────────────────
+AI = OpenAI(api_key=OPENAI_TOKEN)
+HAZARD_TYPES = [
+    "Pothole","Traffic Jam","Construction","Accident",
+    "Flooded Road","Debris on Road","Damaged Sign","Closed Lane"
+]
+EMOJI_MAP = {
+    "Pothole":"⚠️","Traffic Jam":"🚗","Construction":"🚧","Accident":"🚨",
+    "Flooded Road":"💧","Debris on Road":"🗑️","Damaged Sign":"🚸","Closed Lane":"🚫"
+}
+
+def classify_image(img_bytes):
+    b64 = base64.b64encode(img_bytes).decode()
+    resp = AI.chat.completions.create(
+        model="gpt-4-turbo",
+        messages=[{
+            "role":"user",
+            "content":[
+                {"type":"text","text":(
+                    "Choose exactly one hazard type from: "+", ".join(HAZARD_TYPES)
+                )},
+                {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}
+            ]
+        }],
+        max_tokens=10
+    )
+    raw = resp.choices[0].message.content.strip()
+    # sanitize: pick the first matching HAZARD_TYPES
+    for h in HAZARD_TYPES:
+        if h.lower() in raw.lower():
+            return h
+    return raw  # fallback if nothing matched
+
+# ─── session state init ───────────────────────────
+ss = st.session_state
+ss.setdefault("reports", [])
+ss.setdefault("alerts", [])
+ss.setdefault("filter_type", [])
+ss.setdefault("filter_severity", [])
+
+# ─── Layout: main + right columns ──────────────────
+main_col, right_col = st.columns([7,3])
+
+# → RIGHT: Map & Filter Options + Live Alerts
+with right_col:
+    st.header("⚙️ Map & Filter Options")
+    show_inc    = st.checkbox("⚠️ Incidents",    True)
+    show_close  = st.checkbox("🚫 Closures",     True)
+    show_event  = st.checkbox("🎌 Events",       True)
+    show_constr = st.checkbox("🚧 Construction", True)
+
+    st.markdown("---")
+    st.header("📢 Live Traffic Alerts")
+    # user alerts
+    for a in ss.alerts:
+        ts = format_time(a["time"])
+        st.warning(f"{a['message']} — {ts}")
+    # 511 feed
+    evs = fetch_511_events()
+    cls = fetch_511_closures()
+    if evs or cls:
+        for e in evs[:5]:
+            ts = format_time(e.get("start_time","") or e.get("start",""))
+            st.warning(f"🚨 {e.get('headline','')} — {ts}")
+        for c in cls[:5]:
+            ts = format_time(c.get("start_time","") or c.get("start",""))
+            st.info(f"🛑 {c.get('headline','')} — {ts}")
+    else:
+        st.info("No 511 alerts right now.")
+
+    st.markdown("---")
+    st.header("🔎 Filter Options")
+    ss.filter_type     = st.multiselect("Hazard Type", HAZARD_TYPES,            default=HAZARD_TYPES)
+    ss.filter_severity = st.multiselect("Severity",    ["Low","Medium","High"], default=["Low","Medium","High"])
+
+# → MAIN: Title & Tabs
+with main_col:
+    st.title("🚧 Road Hazard Reporting App")
+    tab1, tab2, tab3 = st.tabs(["📝 Report Hazard","🗺️ View Hazards","📊 Analytics & Resources"])
+
+    # ── Tab 1: Report Hazard ─────────────────────────
+    with tab1:
+        mode = st.radio("Choose a reporting mode:",
+                        ["Manual Report","Automatic Detection"], horizontal=True)
+
+        m = folium.Map(location=[37.3382,-121.8863], zoom_start=13)
+        mc = MarkerCluster().add_to(m)
+        for r in ss.reports:
+            folium.Marker(
+                [r["lat"],r["lon"]],
+                popup=r["hazard_type"],
+                icon=folium.Icon(color="red")
+            ).add_to(mc)
+
+        clicked = st_folium(
+            m, width=700, height=450,
+            returned_objects=["last_clicked"], key="map1"
+        )["last_clicked"]
+
+        if clicked:
+            lat, lon = clicked["lat"], clicked["lng"]
+            inter = get_intersection(lat, lon)
+            st.success(f"📍 Intersection: **{inter}**")
+
+            if mode == "Manual Report":
+                with st.form("man"):
+                    ht   = st.selectbox("Hazard Type", HAZARD_TYPES)
+                    sev  = st.select_slider("Severity", ["Low","Medium","High"])
+                    desc = st.text_area("Description")
+                    img  = st.file_uploader("Image (optional)", type=["jpg","jpeg","png"])
+                    sub  = st.form_submit_button("Submit Report")
+                if sub:
+                    bts = img.read() if img else None
+                    if bts:
+                        p = classify_image(bts)
+                        ht = p if p in HAZARD_TYPES else ht
+                    rpt = {
+                        "id": len(ss.reports)+1,
+                        "lat": lat, "lon": lon,
+                        "hazard_type": ht,
+                        "severity": sev,
+                        "description": desc,
+                        "image_bytes": bts,
+                        "image_name": img.name if img else None,
+                        "time": datetime.datetime.utcnow().isoformat(),
+                        "votes":1, "status":"Reported"
+                    }
+                    ss.reports.append(rpt)
+                    ss.alerts.insert(0,{"message":f"{ht} at {inter}","time":rpt["time"]})
+                    st.success("✅ Submitted!"); st.rerun()
+
+            else:
+                img2 = st.file_uploader("Image to auto‑detect", type=["jpg","jpeg","png"], key="auto")
+                if img2:
+                    b2 = img2.read()
+                    pred = classify_image(b2)
+                    if pred in HAZARD_TYPES:
+                        st.success(f"🔍 {pred} {EMOJI_MAP[pred]}")
+                    else:
+                        st.warning(f"🔍 classified as: {pred}")
+                    with st.form("autofm"):
+                        sev2  = st.select_slider("Severity", ["Low","Medium","High"])
+                        notes = st.text_area("Notes (opt)")
+                        sub2  = st.form_submit_button("Submit Auto‑Report")
+                    if sub2:
+                        rpt = {
+                            "id": len(ss.reports)+1,
+                            "lat": lat, "lon": lon,
+                            "hazard_type": pred if pred in HAZARD_TYPES else "Unknown",
+                            "severity": sev2,
+                            "description": notes,
+                            "image_bytes": b2,
+                            "image_name": img2.name,
+                            "time": datetime.datetime.utcnow().isoformat(),
+                            "votes":1, "status":"Reported"
+                        }
+                        ss.reports.append(rpt)
+                        ss.alerts.insert(0,{"message":f"{pred} at {inter}","time":rpt["time"]})
+                        st.success("✅ Submitted!"); st.rerun()
+
+    # ── Tab 2: View Hazards ───────────────────────────
+    with tab2:
+        st.markdown("### View All Reported & 511 Hazards")
+        m2 = folium.Map(location=[37.3382,-121.8863], zoom_start=12)
+
+        # user reports layer
+        fg_u = folium.FeatureGroup("🧑‍💻 User Reports", show=True)
+        for r in ss.reports:
+            if (not ss.filter_type or r["hazard_type"] in ss.filter_type) and \
+               (not ss.filter_severity or r["severity"] in ss.filter_severity):
+                # build HTML for popup
+                popup_html = ""
+                if r["image_bytes"]:
+                    img_b64 = base64.b64encode(r["image_bytes"]).decode()
+                    popup_html += f'<img src="data:image/jpeg;base64,{img_b64}" width="200"><br>'
+                popup_html += (
+                    f"<b>Type:</b> {r['hazard_type']}<br>"
+                    f"<b>Description:</b> {r['description']}<br>"
+                    f"<b>Severity:</b> {r['severity']}<br>"
+                    f"<b>Status:</b> {r['status']}<br>"
+                    f"<b>Time:</b> {format_time(r['time'])}"
+                )
+                folium.Marker(
+                    [r["lat"], r["lon"]],
+                    popup=folium.Popup(popup_html, max_width=300),
+                    icon=folium.Icon(color="red")
+                ).add_to(fg_u)
+        m2.add_child(fg_u)
+
+        # 511 incidents/closures/events/construction
+        evs = fetch_511_events(); cls = fetch_511_closures()
+
+        if show_inc:
+            fg_i = folium.FeatureGroup("⚠️ Incidents", show=True)
+            for e in evs:
+                geo = e.get("geography",{}).get("coordinates")
+                if geo: folium.Marker([geo[1],geo[0]],
+                                      popup=e.get("headline",""),
+                                      icon=folium.Icon(color="orange", icon="exclamation-triangle")
+                                     ).add_to(fg_i)
+            m2.add_child(fg_i)
+
+        if show_close:
+            fg_c = folium.FeatureGroup("🚫 Closures", show=False)
+            for c in cls:
+                cg = c.get("closure_geography",{}).get("coordinates")
+                if cg and cg[0]:
+                    folium.Marker([cg[0][1],cg[0][0]],
+                                  popup=c.get("headline",""),
+                                  icon=folium.Icon(color="purple", icon="ban")
+                                 ).add_to(fg_c)
+            m2.add_child(fg_c)
+
+        if show_event:
+            fg_e = folium.FeatureGroup("🎌 Events", show=False)
+            for e in evs:
+                if e.get("subtype","").upper()=="EVENT":
+                    geo = e["geography"]["coordinates"]
+                    folium.Marker([geo[1],geo[0]],
+                                  popup=e.get("headline",""),
+                                  icon=folium.Icon(color="purple", icon="flag")
+                                 ).add_to(fg_e)
+            m2.add_child(fg_e)
+
+        if show_constr:
+            fg_s = folium.FeatureGroup("🚧 Construction", show=False)
+            for e in evs:
+                if e.get("subtype","").upper()=="CONSTRUCTION":
+                    geo = e["geography"]["coordinates"]
+                    folium.Marker([geo[1],geo[0]],
+                                  popup=e.get("headline",""),
+                                  icon=folium.Icon(color="darkred", icon="road")
+                                 ).add_to(fg_s)
+            m2.add_child(fg_s)
+
+        folium.LayerControl(collapsed=False).add_to(m2)
+        st_folium(m2, width=700, height=500)
+
+        st.subheader("List of Reports")
+        filtered = [
+            r for r in ss.reports
+            if (not ss.filter_type     or r["hazard_type"] in ss.filter_type)
+            and (not ss.filter_severity or r["severity"]    in ss.filter_severity)
+        ]
+        if filtered:
+            for i,r in enumerate(filtered):
+                ts = format_time(r["time"])
+                with st.expander(f"{r['hazard_type']} — {ts}"):
+                    loc = get_intersection(r["lat"], r["lon"])
+                    st.write(f"**Location:** {loc}")
+                    if r["image_bytes"]:
+                        st.image(r["image_bytes"], caption=r["image_name"], use_container_width=True)
+                    st.write(f"**Description:** {r['description']}")
+                    st.write(f"**Severity:** {r['severity']}")
+                    st.write(f"**Status:** {r['status']}")
+                    c1,c2 = st.columns(2)
+                    if c1.button(f"👍 Upvote ({r['votes']})", key=f"up_{i}"):
+                        r["votes"] += 1; st.rerun()
+                    if c2.button("✅ Mark Resolved", key=f"res_{i}"):
+                        r["status"] = "Resolved"; st.rerun()
+        else:
+            st.info("No reports match the current filters.")
+
+    # ── Tab 3: Analytics & Resources (unchanged) ─────
+    with tab3:
+        analytics_tab, resources_tab = st.tabs([
+            "📈 Analytics Dashboard","🏙️ FAQ"
+        ])
+
+        with analytics_tab:
+            st.markdown("### Analytics Dashboard")
+            if not ss.reports:
+                st.info("No reports available for analysis.")
+            else:
+                total    = len(ss.reports)
+                active   = len([r for r in ss.reports if r["status"]=="Reported"])
+                resolved = len([r for r in ss.reports if r["status"]=="Resolved"])
+                c1,c2,c3 = st.columns(3)
+                c1.metric("Total Reports", total)
+                c2.metric("Active Reports", active)
+                c3.metric("Resolved Reports", resolved)
+
+                counts = {ht:0 for ht in HAZARD_TYPES}
+                for r in ss.reports: counts[r["hazard_type"]] += 1
+                df_h = pd.DataFrame.from_dict(counts, orient="index", columns=["Count"])
+                df_h.index.name="Hazard Type"
+                st.subheader("Hazard Type Distribution")
+                st.bar_chart(df_h)
+
+                sev_counts = {
+                    lvl:len([r for r in ss.reports if r["severity"]==lvl])
+                    for lvl in ["Low","Medium","High"]
+                }
+                df_s = pd.DataFrame.from_dict(sev_counts, orient="index", columns=["Count"])
+                df_s.index.name="Severity"
+                st.subheader("Severity Distribution")
+                st.bar_chart(df_s)
+
+        with resources_tab:
+            st.markdown("### Summarize User Reports")
+           
+            if not ss.reports:
+                st.info("No data available for analysis.")
+            else:
+                question = st.selectbox("Choose a question to analyze:", [
+                    "What is the most reported hazard type?",
+                    "Which severity level is most common?",
+                    "Which hazard type has the highest severity average?",
+                    "How many total reports are there?",
+                    "What percentage of reports are resolved?"
+                ])
+
+                if question == "What is the most reported hazard type?":
+                    counts = pd.Series([r["hazard_type"] for r in ss.reports]).value_counts()
+                    st.write(f"The most reported hazard is **{counts.idxmax()}** with {counts.max()} reports.")
+
+                elif question == "Which severity level is most common?":
+                    counts = pd.Series([r["severity"] for r in ss.reports]).value_counts()
+                    st.write(f"The most common severity level is **{counts.idxmax()}**.")
+
+                elif question == "Which hazard type has the highest severity average?":
+                    sev_map = {"Low": 1, "Medium": 2, "High": 3}
+                    df = pd.DataFrame(ss.reports)
+                    df["sev_num"] = df["severity"].map(sev_map)
+                    avg_sev = df.groupby("hazard_type")["sev_num"].mean()
+                    st.write(f"**{avg_sev.idxmax()}** has the highest average severity of **{avg_sev.max():.2f}**.")
+
+                elif question == "How many total reports are there?":
+                    st.write(f"There are **{len(ss.reports)}** total reports.")
+
+                elif question == "What percentage of reports are resolved?":
+                    resolved = len([r for r in ss.reports if r["status"] == "Resolved"])
+                    percent = resolved / len(ss.reports) * 100
+                    st.write(f"**{percent:.2f}%** of reports are resolved.")
+
+
+
+
+
+            st.markdown("### 🤔 Ask a Custom Question")
+            user_q = st.text_area("Can't find your question above? Ask here:", placeholder="e.g., Which month had the most reports?")
+            if st.button("Submit"):
+                    if user_q.strip():
+                        with st.spinner("Thinking..."):
+                            df = pd.DataFrame(ss.reports)
+                            # Provide context to the assistant
+                            messages = [
+                                {"role": "system", "content": (
+                                    "You are a helpful data analyst assistant. You are analyzing road hazard reports. "
+                                    "Each report includes: hazard_type, severity (Low/Medium/High), description, status (Reported/Resolved), and timestamp."
+                                )},
+                                {"role": "user", "content": f"Here is the data: {df.to_dict(orient='records')[:50]}\n\nQuestion: {user_q}"}
+                            ]
+                            try:
+                                answer = AI.chat.completions.create(
+                                    model="gpt-3.5-turbo",
+                                    messages=messages,
+                                    max_tokens=300
+                                ).choices[0].message.content
+                                st.markdown("#### 📝 Response")
+                                st.success(answer)
+                            except Exception as e:
+                                st.error("❌ Could not get a response. Please try again.")
+                                st.exception(e)
+                    else:
+                        st.warning("Please enter a question before submitting.")
+                    
+            st.markdown("### Additional Resources")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("""
+                **Emergency Services:**  
+                - Police (non‑emergency): 408‑277‑8900  
+                - Fire   (non‑emergency): 408‑277‑8950  
+                - Road Emergencies: **911**
+                """)
+
+            with col2:
+                st.markdown("""
+                **Dept. Contacts:**  
+                - Transportation: 408‑535‑3850  
+                - Environmental: 408‑535‑8550  
+                - Public Works: 408‑535‑8300
+                """)
+
+            st.markdown("""
+            **Online Reporting:**  
+            - [My San José App](https://www.sanjoseca.gov/your-government/departments-offices/public-works/my-san-josé)  
+            - [Report Illegal Dumping](https://www.sanjoseca.gov/.../report-illegal-dumping)  
+            - [Traffic Signal Issues](https://www.sanjoseca.gov/.../traffic-signals)
+            """)
